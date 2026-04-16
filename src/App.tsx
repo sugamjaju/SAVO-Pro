@@ -258,8 +258,19 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDesc, setNewProjectDesc] = useState('');
+  
+  // Task Form State
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDesc, setNewTaskDesc] = useState('');
+  const [newTaskProjectId, setNewTaskProjectId] = useState('');
+  const [newTaskPriority, setNewTaskPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [assigneeSearch, setAssigneeSearch] = useState('');
+  const [selectedAssignee, setSelectedAssignee] = useState<{uid: string, name: string} | null>(null);
+  const [allUsers, setAllUsers] = useState<{uid: string, displayName: string}[]>([]);
+  const [showUserSuggestions, setShowUserSuggestions] = useState(false);
 
   // Sync User Profile on Login
   useEffect(() => {
@@ -280,12 +291,29 @@ export default function App() {
     }
   }, [user]);
 
+  // Fetch All Users for Suggestions
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'users'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setAllUsers(snapshot.docs.map(doc => ({ 
+        uid: doc.data().uid, 
+        displayName: doc.data().displayName 
+      })));
+    });
+    return unsubscribe;
+  }, [user]);
+
   // Fetch Projects
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, 'projects'), where('members', 'array-contains', user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
+      const fetchedProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project));
+      setProjects(fetchedProjects);
+      if (fetchedProjects.length > 0 && !newTaskProjectId) {
+        setNewTaskProjectId(fetchedProjects[0].id);
+      }
     });
     return unsubscribe;
   }, [user]);
@@ -327,6 +355,43 @@ export default function App() {
       toast.error('Failed to create project');
     }
   };
+
+  const handleCreateTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTaskTitle.trim() || !newTaskProjectId) return;
+
+    try {
+      await addDoc(collection(db, 'tasks'), {
+        title: newTaskTitle,
+        description: newTaskDesc,
+        status: 'pending',
+        priority: newTaskPriority,
+        projectId: newTaskProjectId,
+        assignedTo: selectedAssignee?.uid || '',
+        assignedToName: selectedAssignee?.name || '',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      
+      // Reset form
+      setNewTaskTitle('');
+      setNewTaskDesc('');
+      setSelectedAssignee(null);
+      setAssigneeSearch('');
+      setIsCreatingTask(false);
+      toast.success('Task created and assigned!');
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to create task');
+    }
+  };
+
+  const filteredUsers = useMemo(() => {
+    if (!assigneeSearch.trim()) return [];
+    return allUsers.filter(u => 
+      u.displayName.toLowerCase().includes(assigneeSearch.toLowerCase())
+    ).slice(0, 5);
+  }, [assigneeSearch, allUsers]);
 
   const taskStats = useMemo(() => {
     const stats = {
@@ -412,6 +477,12 @@ export default function App() {
                   className="h-9 pl-9 pr-4 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 w-64"
                 />
               </div>
+              <button 
+                onClick={() => setIsCreatingTask(true)}
+                className="h-9 px-4 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-50 transition-all flex items-center gap-2"
+              >
+                <Plus size={16} /> New Task
+              </button>
               <button 
                 onClick={() => setIsCreatingProject(true)}
                 className="h-9 px-4 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 transition-all flex items-center gap-2"
@@ -533,6 +604,77 @@ export default function App() {
                 )}
               </div>
             </div>
+
+            {/* Recent Tasks Table */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <ListTodo className="text-blue-600" size={20} />
+                  Recent Tasks
+                </h3>
+                <button className="text-sm font-bold text-blue-600 hover:underline">View All Tasks</button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50/50">
+                      <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-400">Task Name</th>
+                      <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-400">Project</th>
+                      <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-400">Assignee</th>
+                      <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-400">Status</th>
+                      <th className="px-6 py-4 text-xs font-bold uppercase tracking-wider text-slate-400">Priority</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {tasks.slice(0, 5).map(task => (
+                      <tr key={task.id} className="hover:bg-slate-50/50 transition-colors">
+                        <td className="px-6 py-4">
+                          <span className="text-sm font-bold text-slate-700">{task.title}</span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="text-xs font-medium text-slate-500">
+                            {projects.find(p => p.id === task.projectId)?.name || 'Unknown'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px] font-bold">
+                              {task.assignedToName?.charAt(0) || '?'}
+                            </div>
+                            <span className="text-xs text-slate-600">{task.assignedToName || 'Unassigned'}</span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                            task.status === 'completed' ? 'bg-green-100 text-green-700' :
+                            task.status === 'in-progress' ? 'bg-blue-100 text-blue-700' :
+                            'bg-amber-100 text-amber-700'
+                          }`}>
+                            {task.status.replace('-', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`text-xs font-bold ${
+                            task.priority === 'high' ? 'text-red-500' :
+                            task.priority === 'medium' ? 'text-amber-500' :
+                            'text-slate-400'
+                          }`}>
+                            {task.priority}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {tasks.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-12 text-center text-slate-400 text-sm">
+                          No tasks found. Create your first task to see it here.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </main>
 
@@ -592,6 +734,142 @@ export default function App() {
                       className="flex-1 h-12 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20"
                     >
                       Create Project
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+        {/* Create Task Modal */}
+        <AnimatePresence>
+          {isCreatingTask && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsCreatingTask(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="relative bg-white w-full max-w-md p-8 rounded-3xl shadow-2xl"
+              >
+                <h3 className="text-2xl font-bold text-slate-900 mb-2">Create New Task</h3>
+                <p className="text-slate-500 mb-6 text-sm">Assign tasks to team members and set priorities.</p>
+                
+                <form onSubmit={handleCreateTask} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Task Title</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Design Landing Page"
+                      className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      value={newTaskTitle}
+                      onChange={e => setNewTaskTitle(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Project</label>
+                    <select 
+                      className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all appearance-none"
+                      value={newTaskProjectId}
+                      onChange={e => setNewTaskProjectId(e.target.value)}
+                      required
+                    >
+                      {projects.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5 relative">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Assign To</label>
+                    <div className="relative">
+                      <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                      <input 
+                        type="text" 
+                        placeholder="Type name to search..."
+                        className="w-full h-11 pl-10 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                        value={selectedAssignee ? selectedAssignee.name : assigneeSearch}
+                        onChange={e => {
+                          setAssigneeSearch(e.target.value);
+                          setSelectedAssignee(null);
+                          setShowUserSuggestions(true);
+                        }}
+                        onFocus={() => setShowUserSuggestions(true)}
+                      />
+                    </div>
+                    
+                    {/* Suggestions Dropdown */}
+                    <AnimatePresence>
+                      {showUserSuggestions && filteredUsers.length > 0 && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: -10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -10 }}
+                          className="absolute z-10 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden"
+                        >
+                          {filteredUsers.map(u => (
+                            <button
+                              key={u.uid}
+                              type="button"
+                              className="w-full px-4 py-3 text-left hover:bg-slate-50 flex items-center gap-3 transition-colors"
+                              onClick={() => {
+                                setSelectedAssignee({ uid: u.uid, name: u.displayName });
+                                setAssigneeSearch(u.displayName);
+                                setShowUserSuggestions(false);
+                              }}
+                            >
+                              <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs">
+                                {u.displayName.charAt(0)}
+                              </div>
+                              <span className="text-sm font-medium text-slate-700">{u.displayName}</span>
+                            </button>
+                          ))}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Priority</label>
+                    <div className="flex gap-2">
+                      {(['low', 'medium', 'high'] as const).map(p => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setNewTaskPriority(p)}
+                          className={`flex-1 h-10 rounded-lg text-xs font-bold uppercase tracking-wider transition-all border ${
+                            newTaskPriority === p 
+                              ? 'bg-blue-600 border-blue-600 text-white' 
+                              : 'bg-white border-slate-200 text-slate-500 hover:border-blue-200'
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  <div className="flex gap-3 pt-4">
+                    <button 
+                      type="button"
+                      onClick={() => setIsCreatingTask(false)}
+                      className="flex-1 h-12 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-1 h-12 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20"
+                    >
+                      Create Task
                     </button>
                   </div>
                 </form>
