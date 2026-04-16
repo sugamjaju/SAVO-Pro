@@ -1,7 +1,631 @@
-export default function App() {
+import React, { useState, useEffect, useMemo } from 'react';
+import { useAuthState } from 'react-firebase-hooks/auth';
+import { 
+  auth, 
+  db, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  updateProfile,
+  signInWithGoogle,
+  logout 
+} from './lib/firebase';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  serverTimestamp, 
+  orderBy,
+  doc, 
+  getDoc, 
+  setDoc 
+} from 'firebase/firestore';
+import { 
+  LayoutDashboard, 
+  Mail, 
+  Lock, 
+  User as UserIcon, 
+  LogIn, 
+  UserPlus,
+  AlertCircle,
+  Plus,
+  FolderKanban,
+  ListTodo,
+  Users,
+  LogOut,
+  CheckCircle2,
+  Clock,
+  BarChart3,
+  ChevronRight,
+  Search
+} from 'lucide-react';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer, 
+  Cell
+} from 'recharts';
+import { motion, AnimatePresence } from 'motion/react';
+import { Toaster, toast } from 'sonner';
+
+// --- Types ---
+
+interface Project {
+  id: string;
+  name: string;
+  description: string;
+  ownerId: string;
+  members: string[];
+  createdAt: any;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  status: 'pending' | 'in-progress' | 'completed';
+  priority: 'low' | 'medium' | 'high';
+  assignedTo: string;
+  assignedToName: string;
+  projectId: string;
+}
+
+// --- Components ---
+
+const ErrorBoundary = ({ children }: { children: React.ReactNode }) => {
+  const [hasError, setHasError] = useState(false);
+  const [errorInfo, setErrorInfo] = useState<any>(null);
+
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      try {
+        const info = JSON.parse(event.error.message);
+        setErrorInfo(info);
+        setHasError(true);
+      } catch (e) {
+        // Not a firestore error we formatted
+      }
+    };
+    window.addEventListener('error', handleError);
+    return () => window.removeEventListener('error', handleError);
+  }, []);
+
+  if (hasError) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen p-4 bg-red-50">
+        <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
+        <h1 className="text-2xl font-bold text-red-900 mb-2">Something went wrong</h1>
+        <p className="text-red-700 mb-4 text-center max-w-md">
+          {errorInfo?.error || "An unexpected error occurred."}
+        </p>
+        <button 
+          onClick={() => window.location.reload()}
+          className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+        >
+          Reload Application
+        </button>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+};
+
+function AuthView() {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+        toast.success('Welcome back!');
+      } else {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(userCredential.user, { displayName });
+        
+        // Sync to Firestore
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          email: userCredential.user.email,
+          displayName: displayName,
+          photoURL: '',
+          role: 'member',
+          createdAt: new Date()
+        });
+        
+        toast.success('Account created successfully!');
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error.message || 'Authentication failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
-    <div className="flex items-center justify-center min-h-screen">
-      <h1 className="text-2xl font-bold">Project Reset</h1>
+    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-50 p-4">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl border border-slate-100"
+      >
+        <div className="bg-blue-600/10 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6">
+          <LayoutDashboard className="w-8 h-8 text-blue-600" />
+        </div>
+        <h1 className="text-3xl font-bold text-slate-900 mb-2 text-center">SAVO Pro</h1>
+        <p className="text-slate-500 mb-8 text-center text-sm">
+          {isLogin ? 'Sign in to manage your projects' : 'Start your journey with SAVO Pro'}
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {!isLogin && (
+            <div className="space-y-1.5">
+              <label className="text-sm font-semibold text-slate-700 ml-1">Full Name</label>
+              <div className="relative">
+                <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                <input 
+                  type="text"
+                  placeholder="John Doe" 
+                  className="w-full h-11 pl-10 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                  value={displayName}
+                  onChange={e => setDisplayName(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <label className="text-sm font-semibold text-slate-700 ml-1">Email Address</label>
+            <div className="relative">
+              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+              <input 
+                type="email"
+                placeholder="name@company.com" 
+                className="w-full h-11 pl-10 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-semibold text-slate-700 ml-1">Password</label>
+            <div className="relative">
+              <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+              <input 
+                type="password"
+                placeholder="••••••••" 
+                className="w-full h-11 pl-10 pr-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+
+          <button 
+            type="submit" 
+            className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed mt-2"
+            disabled={isLoading}
+          >
+            {isLoading ? (
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+            ) : (
+              <>
+                {isLogin ? <LogIn size={20} /> : <UserPlus size={20} />}
+                {isLogin ? 'Sign In' : 'Create Account'}
+              </>
+            )}
+          </button>
+        </form>
+
+        <div className="mt-8 pt-6 border-t border-slate-100 text-center">
+          <button 
+            onClick={() => setIsLogin(!isLogin)}
+            className="text-sm text-blue-600 font-bold hover:text-blue-700 transition-colors"
+          >
+            {isLogin ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <button 
+            onClick={signInWithGoogle}
+            className="w-full h-11 flex items-center justify-center gap-3 bg-white border border-slate-200 rounded-xl text-slate-600 font-semibold hover:bg-slate-50 transition-all"
+          >
+            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/layout/google.svg" className="w-5 h-5" alt="Google" />
+            Continue with Google
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [user, loading] = useAuthState(auth);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDesc, setNewProjectDesc] = useState('');
+
+  // Sync User Profile on Login
+  useEffect(() => {
+    if (user && user.providerData[0]?.providerId === 'google.com') {
+      const userRef = doc(db, 'users', user.uid);
+      getDoc(userRef).then((docSnap) => {
+        if (!docSnap.exists()) {
+          setDoc(userRef, {
+            uid: user.uid,
+            email: user.email,
+            displayName: user.displayName || 'Anonymous',
+            photoURL: user.photoURL || '',
+            role: 'member',
+            createdAt: new Date()
+          });
+        }
+      });
+    }
+  }, [user]);
+
+  // Fetch Projects
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'projects'), where('members', 'array-contains', user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
+    });
+    return unsubscribe;
+  }, [user]);
+
+  // Fetch All Tasks for Dashboard Summary
+  useEffect(() => {
+    if (!user || projects.length === 0) {
+      setTasks([]);
+      return;
+    }
+    
+    const projectIds = projects.map(p => p.id);
+    // Firestore 'in' query limit is 10
+    const q = query(collection(db, 'tasks'), where('projectId', 'in', projectIds.slice(0, 10)));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task)));
+    });
+    return unsubscribe;
+  }, [projects, user]);
+
+  const handleCreateProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProjectName.trim()) return;
+    
+    try {
+      await addDoc(collection(db, 'projects'), {
+        name: newProjectName,
+        description: newProjectDesc,
+        ownerId: user?.uid,
+        members: [user?.uid],
+        createdAt: serverTimestamp()
+      });
+      setNewProjectName('');
+      setNewProjectDesc('');
+      setIsCreatingProject(false);
+      toast.success('Project created successfully!');
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to create project');
+    }
+  };
+
+  const taskStats = useMemo(() => {
+    const stats = {
+      pending: tasks.filter(t => t.status === 'pending').length,
+      inProgress: tasks.filter(t => t.status === 'in-progress').length,
+      completed: tasks.filter(t => t.status === 'completed').length,
+    };
+    return [
+      { name: 'Pending', value: stats.pending, color: '#f59e0b' },
+      { name: 'In Progress', value: stats.inProgress, color: '#3b82f6' },
+      { name: 'Completed', value: stats.completed, color: '#10b981' },
+    ];
+  }, [tasks]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <>
+        <Toaster position="top-right" richColors />
+        <AuthView />
+      </>
+    );
+  }
+
+  return (
+    <ErrorBoundary>
+      <Toaster position="top-right" richColors />
+      <div className="flex h-screen bg-slate-50 overflow-hidden">
+        {/* Sidebar */}
+        <aside className="w-64 bg-slate-900 text-white flex flex-col">
+          <div className="p-6">
+            <div className="flex items-center gap-3 mb-8">
+              <div className="bg-blue-600 p-2 rounded-lg">
+                <LayoutDashboard size={24} />
+              </div>
+              <span className="text-xl font-bold tracking-tight">SAVO Pro</span>
+            </div>
+
+            <nav className="space-y-1">
+              <SidebarItem icon={<BarChart3 size={18} />} label="Dashboard" active />
+              <SidebarItem icon={<FolderKanban size={18} />} label="Projects" />
+              <SidebarItem icon={<ListTodo size={18} />} label="My Tasks" />
+              <SidebarItem icon={<Users size={18} />} label="Team" />
+            </nav>
+          </div>
+
+          <div className="mt-auto p-6 border-t border-slate-800">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center font-bold">
+                {user.displayName?.charAt(0) || user.email?.charAt(0)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold truncate">{user.displayName || 'User'}</p>
+                <p className="text-xs text-slate-400 truncate">{user.email}</p>
+              </div>
+            </div>
+            <button 
+              onClick={logout}
+              className="w-full flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors"
+            >
+              <LogOut size={16} /> Sign Out
+            </button>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 overflow-y-auto">
+          <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10">
+            <h2 className="text-lg font-bold text-slate-800">Command Center</h2>
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <input 
+                  type="text" 
+                  placeholder="Search..." 
+                  className="h-9 pl-9 pr-4 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 w-64"
+                />
+              </div>
+              <button 
+                onClick={() => setIsCreatingProject(true)}
+                className="h-9 px-4 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 transition-all flex items-center gap-2"
+              >
+                <Plus size={16} /> New Project
+              </button>
+            </div>
+          </header>
+
+          <div className="p-8 max-w-7xl mx-auto">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+              {/* Task Summary Card */}
+              <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <ListTodo className="text-blue-600" size={20} />
+                    Task Distribution
+                  </h3>
+                  <div className="flex gap-4">
+                    {taskStats.map(stat => (
+                      <div key={stat.name} className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stat.color }} />
+                        <span className="text-xs text-slate-500 font-medium">{stat.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="h-[240px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={taskStats}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                      <Tooltip 
+                        cursor={{ fill: '#f8fafc' }}
+                        contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
+                      />
+                      <Bar dataKey="value" radius={[6, 6, 0, 0]} barSize={60}>
+                        {taskStats.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Quick Stats */}
+              <div className="space-y-4">
+                <StatCard 
+                  title="Active Projects" 
+                  value={projects.length} 
+                  icon={<FolderKanban className="text-blue-600" />} 
+                  trend="+2 this week"
+                />
+                <StatCard 
+                  title="Total Tasks" 
+                  value={tasks.length} 
+                  icon={<ListTodo className="text-orange-600" />} 
+                  trend={`${tasks.filter(t => t.status === 'completed').length} completed`}
+                />
+                <StatCard 
+                  title="Team Members" 
+                  value="1" 
+                  icon={<Users className="text-green-600" />} 
+                  trend="Invite more"
+                />
+              </div>
+            </div>
+
+            {/* Projects List */}
+            <div className="mb-8">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-slate-800">Your Projects</h3>
+                <button className="text-sm font-bold text-blue-600 hover:underline">View All</button>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {projects.map(project => (
+                  <motion.div 
+                    key={project.id}
+                    whileHover={{ y: -4 }}
+                    className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-all cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="bg-blue-50 p-2.5 rounded-xl text-blue-600">
+                        <FolderKanban size={20} />
+                      </div>
+                      <ChevronRight className="text-slate-300 group-hover:text-blue-600 transition-colors" size={20} />
+                    </div>
+                    <h4 className="font-bold text-slate-900 mb-1">{project.name}</h4>
+                    <p className="text-sm text-slate-500 line-clamp-2 mb-4">{project.description || 'No description provided.'}</p>
+                    <div className="flex items-center justify-between pt-4 border-t border-slate-50">
+                      <div className="flex -space-x-2">
+                        <div className="w-7 h-7 rounded-full bg-blue-600 border-2 border-white flex items-center justify-center text-[10px] font-bold text-white">
+                          {user.displayName?.charAt(0)}
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        {tasks.filter(t => t.projectId === project.id).length} Tasks
+                      </span>
+                    </div>
+                  </motion.div>
+                ))}
+                
+                {projects.length === 0 && (
+                  <div className="col-span-full py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
+                    <FolderKanban className="mx-auto text-slate-300 mb-4" size={48} />
+                    <h4 className="font-bold text-slate-800 mb-1">No projects yet</h4>
+                    <p className="text-sm text-slate-500 mb-6">Create your first project to start tracking tasks with your team.</p>
+                    <button 
+                      onClick={() => setIsCreatingProject(true)}
+                      className="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all"
+                    >
+                      Create Project
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {/* Create Project Modal */}
+        <AnimatePresence>
+          {isCreatingProject && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsCreatingProject(false)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="relative bg-white w-full max-w-md p-8 rounded-3xl shadow-2xl"
+              >
+                <h3 className="text-2xl font-bold text-slate-900 mb-2">Create New Project</h3>
+                <p className="text-slate-500 mb-6 text-sm">Define your project scope and start collaborating.</p>
+                
+                <form onSubmit={handleCreateProject} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Project Name</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Website Redesign"
+                      className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      value={newProjectName}
+                      onChange={e => setNewProjectName(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-semibold text-slate-700 ml-1">Description</label>
+                    <textarea 
+                      placeholder="What is this project about?"
+                      rows={3}
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all resize-none"
+                      value={newProjectDesc}
+                      onChange={e => setNewProjectDesc(e.target.value)}
+                    />
+                  </div>
+                  
+                  <div className="flex gap-3 pt-4">
+                    <button 
+                      type="button"
+                      onClick={() => setIsCreatingProject(false)}
+                      className="flex-1 h-12 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-1 h-12 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20"
+                    >
+                      Create Project
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+      </div>
+    </ErrorBoundary>
+  );
+}
+
+// --- Helper Components ---
+
+function SidebarItem({ icon, label, active = false }: { icon: React.ReactNode, label: string, active?: boolean }) {
+  return (
+    <button className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${active ? 'bg-blue-600 text-white font-bold' : 'text-slate-400 hover:text-white hover:bg-white/5'}`}>
+      {icon}
+      <span className="text-sm">{label}</span>
+    </button>
+  );
+}
+
+function StatCard({ title, value, icon, trend }: { title: string, value: string | number, icon: React.ReactNode, trend: string }) {
+  return (
+    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+      <div className="flex items-center justify-between mb-4">
+        <div className="p-2.5 bg-slate-50 rounded-xl">
+          {icon}
+        </div>
+        <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">{trend}</span>
+      </div>
+      <div className="text-3xl font-bold text-slate-900 mb-1">{value}</div>
+      <div className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</div>
     </div>
   );
 }
