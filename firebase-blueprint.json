@@ -10,9 +10,21 @@
         "displayName": { "type": "string" },
         "photoURL": { "type": "string" },
         "role": { "type": "string", "enum": ["admin", "member"] },
+        "orgId": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "email", "displayName"]
+      "required": ["uid", "email", "displayName", "orgId"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "A workspace or company group",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ownerId"]
     },
     "Project": {
       "title": "Project",
@@ -22,10 +34,11 @@
         "name": { "type": "string" },
         "description": { "type": "string" },
         "ownerId": { "type": "string" },
+        "orgId": { "type": "string" },
         "members": { "type": "array", "items": { "type": "string" } },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["name", "ownerId", "members"]
+      "required": ["name", "ownerId", "members", "orgId"]
     },
     "Task": {
       "title": "Task",
@@ -43,12 +56,28 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "status", "projectId"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "A request for a user to join an organization",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "orgId": { "type": "string" },
+        "invitedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "orgId", "invitedBy"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "User profile documents"
+    },
+    "/organizations/{orgId}": {
+      "schema": "Organization",
+      "description": "Organization documents"
     },
     "/projects/{projectId}": {
       "schema": "Project",
@@ -57,6 +86,10 @@
     "/tasks/{taskId}": {
       "schema": "Task",
       "description": "Task documents"
+    },
+    "/invitations/{invitationId}": {
+      "schema": "Invitation",
+      "description": "Invitation documents"
     }
   }
 }

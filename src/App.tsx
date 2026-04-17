@@ -16,6 +16,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc,
+  getDocs,
   serverTimestamp, 
   orderBy,
   doc, 
@@ -133,17 +134,6 @@ function AuthView() {
       } else {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await updateProfile(userCredential.user, { displayName });
-        
-        // Sync to Firestore
-        await setDoc(doc(db, 'users', userCredential.user.uid), {
-          uid: userCredential.user.uid,
-          email: userCredential.user.email,
-          displayName: displayName,
-          photoURL: '',
-          role: 'member',
-          createdAt: new Date()
-        });
-        
         toast.success('Account created successfully!');
       }
     } catch (error: any) {
@@ -256,12 +246,15 @@ function AuthView() {
 
 export default function App() {
   const [user, loading] = useAuthState(auth);
+  const [userProfile, setUserProfile] = useState<any>(null);
   const [currentView, setCurrentView] = useState<'dashboard' | 'projects' | 'tasks' | 'team'>('dashboard');
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isCreatingTask, setIsCreatingTask] = useState(false);
   const [isInvitingMember, setIsInvitingMember] = useState(false);
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
   
   // Project Form State
   const [newProjectName, setNewProjectName] = useState('');
@@ -283,27 +276,64 @@ export default function App() {
 
   // Sync User Profile on Login
   useEffect(() => {
-    if (user && user.providerData[0]?.providerId === 'google.com') {
-      const userRef = doc(db, 'users', user.uid);
-      getDoc(userRef).then((docSnap) => {
-        if (!docSnap.exists()) {
-          setDoc(userRef, {
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName || 'Anonymous',
-            photoURL: user.photoURL || '',
-            role: 'member',
-            createdAt: new Date()
+    if (!user) {
+      setUserProfile(null);
+      return;
+    }
+
+    const userRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userRef, async (docSnap) => {
+      if (docSnap.exists()) {
+        setUserProfile(docSnap.data());
+      } else {
+        // Check for invitations
+        const invQ = query(collection(db, 'invitations'), where('email', '==', user.email));
+        const invSnap = await getDocs(invQ);
+        
+        let targetOrgId = `org_${user.uid}`;
+        let isJoining = false;
+
+        if (!invSnap.empty) {
+          targetOrgId = invSnap.docs[0].data().orgId;
+          isJoining = true;
+        }
+
+        const profileData = {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || user.email?.split('@')[0] || 'Anonymous',
+          photoURL: user.photoURL || '',
+          role: isJoining ? 'member' : 'admin',
+          orgId: targetOrgId,
+          createdAt: serverTimestamp()
+        };
+
+        if (!isJoining) {
+          // Create default organization
+          await setDoc(doc(db, 'organizations', targetOrgId), {
+            name: `${profileData.displayName}'s Workspace`,
+            ownerId: user.uid,
+            createdAt: serverTimestamp()
           });
         }
-      });
-    }
+
+        await setDoc(userRef, profileData);
+        
+        // Delete invitation if joined
+        if (isJoining) {
+          // In a real app, you'd delete or mark it as used
+          // await deleteDoc(invSnap.docs[0].ref);
+        }
+      }
+    });
+
+    return unsubscribe;
   }, [user]);
 
-  // Fetch All Users for Directory
+  // Fetch All Users for Directory (Filtered by Org)
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'users'));
+    if (!userProfile?.orgId) return;
+    const q = query(collection(db, 'users'), where('orgId', '==', userProfile.orgId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setAllUsers(snapshot.docs.map(doc => ({ 
         uid: doc.data().uid, 
@@ -314,12 +344,15 @@ export default function App() {
       })));
     });
     return unsubscribe;
-  }, [user]);
+  }, [userProfile?.orgId]);
 
-  // Fetch Projects
+  // Fetch Projects (Filtered by Org)
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'projects'), where('members', 'array-contains', user.uid));
+    if (!userProfile?.orgId) return;
+    const q = query(
+      collection(db, 'projects'), 
+      where('orgId', '==', userProfile.orgId)
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project));
       setProjects(fetchedProjects);
@@ -328,7 +361,7 @@ export default function App() {
       }
     });
     return unsubscribe;
-  }, [user]);
+  }, [userProfile?.orgId]);
 
   // Fetch All Tasks for Dashboard Summary
   useEffect(() => {
@@ -355,6 +388,7 @@ export default function App() {
         name: newProjectName,
         description: newProjectDesc,
         ownerId: user?.uid,
+        orgId: userProfile.orgId,
         members: [user?.uid],
         createdAt: serverTimestamp()
       });
@@ -400,14 +434,23 @@ export default function App() {
 
   const handleInviteMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteEmail.trim()) return;
+    if (!inviteEmail.trim() || !userProfile?.orgId) return;
     
-    // In a real app, this would send an email or create a placeholder user.
-    // For this demo, we'll just show a success message.
-    toast.success(`Invitation sent to ${inviteEmail}!`);
-    setInviteEmail('');
-    setInviteName('');
-    setIsInvitingMember(false);
+    try {
+      await addDoc(collection(db, 'invitations'), {
+        email: inviteEmail.toLowerCase(),
+        orgId: userProfile.orgId,
+        invitedBy: user?.uid,
+        createdAt: serverTimestamp()
+      });
+      toast.success(`Invitation sent to ${inviteEmail}!`);
+      setInviteEmail('');
+      setInviteName('');
+      setIsInvitingMember(false);
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to send invitation');
+    }
   };
 
   const toggleProjectMembership = async (projectId: string, memberId: string, isMember: boolean) => {
