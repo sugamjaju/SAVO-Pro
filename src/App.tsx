@@ -381,7 +381,10 @@ export default function App() {
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName.trim()) return;
+    if (!newProjectName.trim() || !userProfile?.orgId) {
+      toast.error('Workspace data not loaded. Please wait a moment.');
+      return;
+    }
     
     try {
       await addDoc(collection(db, 'projects'), {
@@ -404,7 +407,10 @@ export default function App() {
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle.trim() || !newTaskProjectId) return;
+    if (!newTaskTitle.trim() || !newTaskProjectId || !userProfile?.orgId) {
+      toast.error('Workspace data not loaded. Please wait a moment.');
+      return;
+    }
 
     try {
       await addDoc(collection(db, 'tasks'), {
@@ -413,6 +419,7 @@ export default function App() {
         status: 'pending',
         priority: newTaskPriority,
         projectId: newTaskProjectId,
+        orgId: userProfile.orgId,
         assignedTo: selectedAssignee?.uid || '',
         assignedToName: selectedAssignee?.name || '',
         createdAt: serverTimestamp(),

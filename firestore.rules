@@ -109,14 +109,10 @@ service cloud.firestore {
     }
 
     match /tasks/{taskId} {
-      function getProject(projectId) {
-        return get(/databases/$(database)/documents/projects/$(projectId)).data;
-      }
-      
-      allow read: if isAuthenticated() && isSameOrg(getProject(resource.data.projectId).orgId);
-      allow create: if isAuthenticated() && isSameOrg(getProject(request.resource.data.projectId).orgId);
-      allow update: if isAuthenticated() && isSameOrg(getProject(resource.data.projectId).orgId);
-      allow delete: if isAuthenticated() && isSameOrg(getProject(resource.data.projectId).orgId);
+      allow read: if isAuthenticated() && isSameOrg(resource.data.orgId);
+      allow create: if isAuthenticated() && isSameOrg(request.resource.data.orgId);
+      allow update: if isAuthenticated() && isSameOrg(resource.data.orgId);
+      allow delete: if isAuthenticated() && isSameOrg(resource.data.orgId);
     }
 
     match /invitations/{invId} {

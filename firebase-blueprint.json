@@ -52,10 +52,11 @@
         "assignedTo": { "type": "string" },
         "assignedToName": { "type": "string" },
         "projectId": { "type": "string" },
+        "orgId": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["title", "status", "projectId"]
+      "required": ["title", "status", "projectId", "orgId"]
     },
     "Invitation": {
       "title": "Invitation",
