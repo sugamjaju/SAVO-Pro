@@ -299,7 +299,7 @@ export default function App() {
         }
       } else {
         // Check for invitations
-        const invQ = query(collection(db, 'invitations'), where('email', '==', user.email));
+        const invQ = query(collection(db, 'invitations'), where('email', '==', user.email?.toLowerCase()));
         const invSnap = await getDocs(invQ);
         
         let targetOrgId = `org_${user.uid}`;
@@ -308,6 +308,8 @@ export default function App() {
         if (!invSnap.empty) {
           targetOrgId = invSnap.docs[0].data().orgId;
           isJoining = true;
+          // In a real app, you might want to show a "Join" button instead of auto-joining,
+          // but for this MVP, auto-joining invitations is smoother.
         }
 
         const profileData = {
@@ -375,21 +377,35 @@ export default function App() {
     return unsubscribe;
   }, [userProfile?.orgId]);
 
-  // Fetch All Tasks for Dashboard Summary
+  // Fetch All Tasks for Workspace
   useEffect(() => {
-    if (!user || projects.length === 0) {
+    if (!userProfile?.orgId) {
       setTasks([]);
       return;
     }
     
-    const projectIds = projects.map(p => p.id);
-    // Firestore 'in' query limit is 10
-    const q = query(collection(db, 'tasks'), where('projectId', 'in', projectIds.slice(0, 10)));
+    // We fetch all tasks in the org. Visibility within the app
+    // is then handled by filtering the results in-memory or 
+    // by providing targeted views.
+    const q = query(
+      collection(db, 'tasks'), 
+      where('orgId', '==', userProfile.orgId),
+      orderBy('createdAt', 'desc')
+    );
+    
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task)));
+    }, (error) => {
+      console.error("Error fetching tasks:", error);
+      // Fallback for missing index
+      const simpleQ = query(collection(db, 'tasks'), where('orgId', '==', userProfile.orgId));
+      onSnapshot(simpleQ, (snap) => {
+        setTasks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task)));
+      });
     });
+    
     return unsubscribe;
-  }, [projects, user]);
+  }, [userProfile?.orgId]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -451,24 +467,47 @@ export default function App() {
     }
   };
 
-  const handleInviteMember = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inviteEmail.trim() || !userProfile?.orgId) return;
-    
+  const [invitations, setInvitations] = useState<any[]>([]);
+
+  // Fetch Invitations for current user email
+  useEffect(() => {
+    if (!user?.email) return;
+    const q = query(collection(db, 'invitations'), where('email', '==', user.email.toLowerCase()));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setInvitations(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return unsubscribe;
+  }, [user?.email]);
+
+  const handleJoinOrganization = async (invitation: any) => {
+    if (!user) return;
     try {
-      await addDoc(collection(db, 'invitations'), {
-        email: inviteEmail.toLowerCase(),
-        orgId: userProfile.orgId,
-        invitedBy: user?.uid,
-        createdAt: serverTimestamp()
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, {
+        orgId: invitation.orgId,
+        role: 'member'
       });
-      toast.success(`Invitation sent to ${inviteEmail}!`);
-      setInviteEmail('');
-      setInviteName('');
-      setIsInvitingMember(false);
+      // Delete invitation after joining
+      await deleteDoc(doc(db, 'invitations', invitation.id));
+      toast.success('Successfully joined the workspace!');
+      // State will update via the onSnapshot listener for user profile
     } catch (error) {
       console.error(error);
-      toast.error('Failed to send invitation');
+      toast.error('Failed to join workspace');
+    }
+  };
+
+  const handleUpdateTaskStatus = async (taskId: string, newStatus: string) => {
+    try {
+      const taskRef = doc(db, 'tasks', taskId);
+      await updateDoc(taskRef, { 
+        status: newStatus,
+        updatedAt: serverTimestamp()
+      });
+      toast.success('Task status updated');
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to update task');
     }
   };
 
@@ -593,6 +632,20 @@ export default function App() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto">
+          {invitations.length > 0 && userProfile?.orgId !== invitations[0].orgId && (
+            <div className="bg-blue-600 text-white px-8 py-3 flex items-center justify-between animate-in slide-in-from-top duration-500">
+              <div className="flex items-center gap-3">
+                <Users size={20} />
+                <span className="text-sm font-bold">You've been invited to join a different workspace!</span>
+              </div>
+              <button 
+                onClick={() => handleJoinOrganization(invitations[0])}
+                className="bg-white text-blue-600 px-4 py-1.5 rounded-lg text-xs font-bold hover:bg-blue-50 transition-colors"
+              >
+                Join Now
+              </button>
+            </div>
+          )}
           <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10">
             <h2 className="text-lg font-bold text-slate-800 capitalize">{currentView}</h2>
             <div className="flex items-center gap-4">
@@ -816,6 +869,87 @@ export default function App() {
                   </div>
                 </div>
               </>
+            )}
+
+            {currentView === 'projects' && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-2xl font-bold text-slate-900">Projects</h3>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {projects.map(project => (
+                    <div 
+                      key={project.id}
+                      className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200"
+                    >
+                      <div className="bg-blue-50 w-12 h-12 rounded-xl flex items-center justify-center text-blue-600 mb-4">
+                        <FolderKanban size={24} />
+                      </div>
+                      <h4 className="font-bold text-slate-900 text-lg mb-2">{project.name}</h4>
+                      <p className="text-sm text-slate-500 mb-6">{project.description || 'No description provided.'}</p>
+                      <div className="flex items-center justify-between pt-4 border-t border-slate-50">
+                        <span className="text-xs font-bold text-slate-400 capitalize">Owner: {project.ownerId === user.uid ? 'You' : 'Team'}</span>
+                        <div className="flex items-center gap-2">
+                           <span className="text-xs font-bold text-blue-600">{tasks.filter(t => t.projectId === project.id).length} Tasks</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {projects.length === 0 && (
+                    <div className="col-span-full py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
+                      <FolderKanban className="mx-auto text-slate-300 mb-4" size={48} />
+                      <p className="text-slate-500">No projects in this workspace yet.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {currentView === 'tasks' && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-2xl font-bold text-slate-900">My Tasks</h3>
+                </div>
+                <div className="grid gap-4">
+                  {tasks.filter(t => t.assignedTo === user.uid).map(task => (
+                    <div key={task.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                      <div className="flex gap-4">
+                        <div className={`w-1 h-12 rounded-full ${
+                          task.priority === 'high' ? 'bg-red-500' : 
+                          task.priority === 'medium' ? 'bg-amber-500' : 'bg-slate-300'
+                        }`} />
+                        <div>
+                          <h4 className="font-bold text-slate-900">{task.title}</h4>
+                          <p className="text-xs text-slate-500">{projects.find(p => p.id === task.projectId)?.name || 'Unknown Project'}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-6">
+                        <select 
+                          value={task.status}
+                          onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/20"
+                        >
+                          <option value="pending">Pending</option>
+                          <option value="in-progress">In Progress</option>
+                          <option value="completed">Completed</option>
+                        </select>
+                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
+                          task.status === 'completed' ? 'bg-green-100 text-green-700' : 
+                          task.status === 'in-progress' ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {task.status.replace('-', ' ')}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                  {tasks.filter(t => t.assignedTo === user.uid).length === 0 && (
+                    <div className="py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
+                      <ListTodo className="mx-auto text-slate-300 mb-4" size={48} />
+                      <p className="text-slate-500">No tasks assigned to you yet.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
 
             {currentView === 'team' && (
