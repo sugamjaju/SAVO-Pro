@@ -284,7 +284,19 @@ export default function App() {
     const userRef = doc(db, 'users', user.uid);
     const unsubscribe = onSnapshot(userRef, async (docSnap) => {
       if (docSnap.exists()) {
-        setUserProfile(docSnap.data());
+        const data = docSnap.data();
+        // Migration: If user exists but has no orgId (from older version), assign one
+        if (!data.orgId) {
+          const defaultOrgId = `org_${user.uid}`;
+          await setDoc(doc(db, 'organizations', defaultOrgId), {
+            name: `${data.displayName || 'My'}'s Workspace`,
+            ownerId: user.uid,
+            createdAt: serverTimestamp()
+          });
+          await updateDoc(userRef, { orgId: defaultOrgId });
+        } else {
+          setUserProfile(data);
+        }
       } else {
         // Check for invitations
         const invQ = query(collection(db, 'invitations'), where('email', '==', user.email));

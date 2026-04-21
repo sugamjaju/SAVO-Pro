@@ -92,7 +92,7 @@ service cloud.firestore {
                       request.resource.data.role == 'member';
       allow update: if isOwner(userId) && 
                       request.resource.data.role == resource.data.role &&
-                      request.resource.data.orgId == resource.data.orgId;
+                      (request.resource.data.orgId == resource.data.orgId || !('orgId' in resource.data));
     }
 
     match /organizations/{orgId} {
