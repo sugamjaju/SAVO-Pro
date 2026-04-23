@@ -67,6 +67,7 @@ interface Project {
   name: string;
   description: string;
   ownerId: string;
+  orgId: string;
   members: string[];
   createdAt: any;
 }
@@ -82,6 +83,8 @@ interface Task {
   projectId: string;
   orgId: string;
   createdBy: string;
+  projectOwnerId?: string;   // Denormalized for security rules
+  projectMembers?: string[]; // Denormalized for security rules
   createdAt?: any;
   updatedAt?: any;
 }
@@ -563,6 +566,9 @@ export default function App() {
     }
 
     try {
+      const project = projects.find(p => p.id === newTaskProjectId);
+      if (!project) throw new Error("Project not found");
+
       await addDoc(collection(db, 'tasks'), {
         title: newTaskTitle,
         description: newTaskDesc,
@@ -573,6 +579,8 @@ export default function App() {
         assignedTo: selectedAssignee?.uid || '',
         assignedToName: selectedAssignee?.name || '',
         createdBy: user?.uid,
+        projectOwnerId: project.ownerId,
+        projectMembers: project.members || [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
@@ -648,20 +656,37 @@ export default function App() {
 
   const handlePostComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedTaskId || !newCommentText.trim() || !user) return;
+    if (!selectedTaskId || !newCommentText.trim() || !user) {
+      toast.error('Missing task or comment text.');
+      return;
+    }
 
     setIsPostingComment(true);
     try {
-      await addDoc(collection(db, 'tasks', selectedTaskId, 'comments'), {
+      const commentData = {
         text: newCommentText.trim(),
         userId: user.uid,
         userName: userProfile?.displayName || user.displayName || 'Anonymous',
+        orgId: userProfile?.orgId || '', // Now optional in rules for maximum compatibility
         createdAt: serverTimestamp()
-      });
+      };
+
+      await addDoc(collection(db, 'tasks', selectedTaskId, 'comments'), commentData);
       setNewCommentText('');
-    } catch (error) {
-      console.error(error);
-      toast.error('Failed to post comment');
+      toast.success('Comment posted!');
+    } catch (error: any) {
+      console.error("DEBUG: Comment Post Failure", {
+        error: error,
+        taskId: selectedTaskId,
+        userId: user.uid,
+        orgId: userProfile?.orgId
+      });
+      
+      if (error.code === 'permission-denied') {
+        toast.error('Security alert: You do not have permission to comment here.');
+      } else {
+        toast.error('System error: ' + (error.message || 'Unknown failure'));
+      }
     } finally {
       setIsPostingComment(false);
     }
