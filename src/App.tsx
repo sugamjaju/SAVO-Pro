@@ -21,7 +21,8 @@ import {
   orderBy,
   doc, 
   getDoc, 
-  setDoc 
+  setDoc,
+  deleteDoc
 } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
@@ -69,11 +70,15 @@ interface Project {
 interface Task {
   id: string;
   title: string;
+  description?: string;
   status: 'pending' | 'in-progress' | 'completed';
   priority: 'low' | 'medium' | 'high';
   assignedTo: string;
   assignedToName: string;
   projectId: string;
+  orgId: string;
+  createdAt?: any;
+  updatedAt?: any;
 }
 
 // --- Components ---
@@ -255,6 +260,7 @@ export default function App() {
   const [isInvitingMember, setIsInvitingMember] = useState(false);
   const [isCreatingOrg, setIsCreatingOrg] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   
   // Project Form State
   const [newProjectName, setNewProjectName] = useState('');
@@ -464,6 +470,32 @@ export default function App() {
     } catch (error) {
       console.error(error);
       toast.error('Failed to create task');
+    }
+  };
+
+  const handleInviteMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inviteEmail.trim() || !userProfile?.orgId) {
+      toast.error('Workspace data not loaded. Please wait a moment.');
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'invitations'), {
+        email: inviteEmail.toLowerCase(),
+        name: inviteName,
+        orgId: userProfile.orgId,
+        invitedBy: user?.uid,
+        invitedByName: user?.displayName,
+        createdAt: serverTimestamp()
+      });
+      setInviteEmail('');
+      setInviteName('');
+      setIsInvitingMember(false);
+      toast.success('Invitation sent to ' + inviteEmail);
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to send invitation');
     }
   };
 
@@ -820,9 +852,13 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {tasks.slice(0, 5).map(task => (
-                          <tr key={task.id} className="hover:bg-slate-50/50 transition-colors">
+                          <tr 
+                            key={task.id} 
+                            className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
+                            onClick={() => setSelectedTaskId(task.id)}
+                          >
                             <td className="px-6 py-4">
-                              <span className="text-sm font-bold text-slate-700">{task.title}</span>
+                              <span className="text-sm font-bold text-slate-700 group-hover:text-blue-600 transition-colors">{task.title}</span>
                             </td>
                             <td className="px-6 py-4">
                               <span className="text-xs font-medium text-slate-500">
@@ -912,7 +948,15 @@ export default function App() {
                 </div>
                 <div className="grid gap-4">
                   {tasks.filter(t => t.assignedTo === user.uid).map(task => (
-                    <div key={task.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                    <div 
+                      key={task.id} 
+                      className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between hover:shadow-md transition-all cursor-pointer group"
+                      onClick={(e) => {
+                        // Prevent opening detail if clicking the select
+                        if ((e.target as HTMLElement).closest('select')) return;
+                        setSelectedTaskId(task.id);
+                      }}
+                    >
                       <div className="flex gap-4">
                         <div className={`w-1 h-12 rounded-full ${
                           task.priority === 'high' ? 'bg-red-500' : 
@@ -1291,6 +1335,107 @@ export default function App() {
                     </button>
                   </div>
                 </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Task Detail Modal */}
+        <AnimatePresence>
+          {selectedTaskId && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setSelectedTaskId(null)}
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, x: 20 }}
+                animate={{ opacity: 1, scale: 1, x: 0 }}
+                exit={{ opacity: 0, scale: 0.95, x: 20 }}
+                className="relative bg-white w-full max-w-lg p-0 rounded-3xl shadow-2xl overflow-hidden"
+              >
+                {tasks.find(t => t.id === selectedTaskId) && (() => {
+                  const task = tasks.find(t => t.id === selectedTaskId)!;
+                  const project = projects.find(p => p.id === task.projectId);
+                  return (
+                    <>
+                      <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                        <div className="flex items-center justify-between mb-4">
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                            task.priority === 'high' ? 'bg-red-100 text-red-700' :
+                            task.priority === 'medium' ? 'bg-amber-100 text-amber-700' :
+                            'bg-slate-100 text-slate-700'
+                          }`}>
+                            {task.priority} Priority
+                          </span>
+                          <button 
+                            onClick={() => setSelectedTaskId(null)}
+                            className="p-2 hover:bg-white rounded-full text-slate-400 hover:text-slate-600 transition-all"
+                          >
+                            <LayoutDashboard size={20} className="rotate-45" />
+                          </button>
+                        </div>
+                        <h3 className="text-2xl font-bold text-slate-900 mb-2">{task.title}</h3>
+                        <div className="flex items-center gap-4 text-sm text-slate-500">
+                          <div className="flex items-center gap-1.5 font-medium">
+                            <FolderKanban size={14} className="text-blue-600" />
+                            {project?.name || 'Private Project'}
+                          </div>
+                          <div className="w-1 h-1 rounded-full bg-slate-300" />
+                          <div className="flex items-center gap-1.5">
+                            <Clock size={14} />
+                            {task.createdAt ? new Date(task.createdAt.seconds * 1000).toLocaleDateString() : 'Just now'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-8 space-y-8">
+                        <div className="space-y-3">
+                          <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Description</h4>
+                          <p className="text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100 italic">
+                            {task.description || 'No detailed description provided for this task.'}
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-6">
+                          <div className="space-y-3">
+                            <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Assignee</h4>
+                            <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
+                              <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs">
+                                {task.assignedToName?.charAt(0) || '?'}
+                              </div>
+                              <span className="text-sm font-bold text-slate-700">{task.assignedToName || 'Unassigned'}</span>
+                            </div>
+                          </div>
+                          <div className="space-y-3">
+                            <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Status</h4>
+                            <select 
+                              value={task.status}
+                              onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value)}
+                              className="w-full h-12 px-4 bg-white border border-slate-200 rounded-xl font-bold text-sm text-slate-700 outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all shadow-sm"
+                            >
+                              <option value="pending">Pending</option>
+                              <option value="in-progress">In Progress</option>
+                              <option value="completed">Completed</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
+                        <button 
+                          onClick={() => setSelectedTaskId(null)}
+                          className="px-6 py-2.5 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 hover:bg-slate-50 transition-all shadow-sm"
+                        >
+                          Close Detail
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
               </motion.div>
             </div>
           )}
