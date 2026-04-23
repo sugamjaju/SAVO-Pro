@@ -22,7 +22,9 @@ import {
   doc, 
   getDoc, 
   setDoc,
-  deleteDoc
+  deleteDoc,
+  or,
+  and
 } from 'firebase/firestore';
 import { 
   LayoutDashboard, 
@@ -41,7 +43,9 @@ import {
   Clock,
   BarChart3,
   ChevronRight,
-  Search
+  Search,
+  MessageSquare,
+  Send
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -77,8 +81,17 @@ interface Task {
   assignedToName: string;
   projectId: string;
   orgId: string;
+  createdBy: string;
   createdAt?: any;
   updatedAt?: any;
+}
+
+interface Comment {
+  id: string;
+  text: string;
+  userId: string;
+  userName: string;
+  createdAt: any;
 }
 
 // --- Components ---
@@ -253,6 +266,8 @@ export default function App() {
   const [user, loading] = useAuthState(auth);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [currentView, setCurrentView] = useState<'dashboard' | 'projects' | 'tasks' | 'team'>('dashboard');
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [taskFilter, setTaskFilter] = useState<'all' | 'mine'>('all');
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
@@ -261,6 +276,9 @@ export default function App() {
   const [isCreatingOrg, setIsCreatingOrg] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [newCommentText, setNewCommentText] = useState('');
+  const [isPostingComment, setIsPostingComment] = useState(false);
   
   // Project Form State
   const [newProjectName, setNewProjectName] = useState('');
@@ -279,6 +297,49 @@ export default function App() {
   // Invite Member State
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
+
+  const filteredUsers = useMemo(() => {
+    if (!assigneeSearch.trim()) return [];
+    return allUsers.filter(u => 
+      u.displayName.toLowerCase().includes(assigneeSearch.toLowerCase())
+    ).slice(0, 5);
+  }, [assigneeSearch, allUsers]);
+
+  const visibleProjects = useMemo(() => {
+    if (!user) return [];
+    return projects.filter(p => 
+      p.ownerId === user.uid || (p.members && p.members.includes(user.uid)) || userProfile?.role === 'admin'
+    );
+  }, [projects, user, userProfile]);
+
+  const visibleTasks = useMemo(() => {
+    if (!user) return [];
+    return tasks.filter(t => {
+      // Direct involvement
+      if (t.assignedTo === user.uid || t.createdBy === user.uid) return true;
+      
+      // Project involvement
+      const project = projects.find(p => p.id === t.projectId);
+      if (project) {
+        if (project.ownerId === user.uid || (project.members && project.members.includes(user.uid))) return true;
+      }
+      
+      return false;
+    });
+  }, [tasks, projects, user]);
+
+  const taskStats = useMemo(() => {
+    const stats = {
+      pending: visibleTasks.filter(t => t.status === 'pending').length,
+      inProgress: visibleTasks.filter(t => t.status === 'in-progress').length,
+      completed: visibleTasks.filter(t => t.status === 'completed').length,
+    };
+    return [
+      { name: 'Pending', value: stats.pending, color: '#f59e0b' },
+      { name: 'In Progress', value: stats.inProgress, color: '#3b82f6' },
+      { name: 'Completed', value: stats.completed, color: '#10b981' },
+    ];
+  }, [visibleTasks]);
 
   // Sync User Profile on Login
   useEffect(() => {
@@ -362,56 +423,111 @@ export default function App() {
         role: doc.data().role,
         createdAt: doc.data().createdAt
       })));
+    }, (error) => {
+      console.error("Error fetching users:", error);
     });
     return unsubscribe;
   }, [userProfile?.orgId]);
 
-  // Fetch Projects (Filtered by Org)
+  // Fetch Projects (Filtered by Org & Involvement)
   useEffect(() => {
-    if (!userProfile?.orgId) return;
-    const q = query(
-      collection(db, 'projects'), 
-      where('orgId', '==', userProfile.orgId)
-    );
+    if (!userProfile?.orgId || !user) return;
+    
+    // For admins, show all in org. For members, show where involved.
+    let q;
+    if (userProfile.role === 'admin') {
+      q = query(
+        collection(db, 'projects'), 
+        where('orgId', '==', userProfile.orgId)
+      );
+    } else {
+      q = query(
+        collection(db, 'projects'), 
+        and(
+          where('orgId', '==', userProfile.orgId),
+          or(
+            where('ownerId', '==', user.uid),
+            where('members', 'array-contains', user.uid)
+          )
+        )
+      );
+    }
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project));
       setProjects(fetchedProjects);
       if (fetchedProjects.length > 0 && !newTaskProjectId) {
         setNewTaskProjectId(fetchedProjects[0].id);
       }
+    }, (error) => {
+      console.error("Error fetching projects:", error);
     });
     return unsubscribe;
-  }, [userProfile?.orgId]);
+  }, [userProfile?.orgId, userProfile?.role, user]);
 
   // Fetch All Tasks for Workspace
   useEffect(() => {
-    if (!userProfile?.orgId) {
-      setTasks([]);
-      return;
+    if (!userProfile?.orgId || !user || projects.length === 0) {
+      if (userProfile?.role !== 'admin') {
+        setTasks([]);
+        return;
+      }
     }
     
-    // We fetch all tasks in the org. Visibility within the app
-    // is then handled by filtering the results in-memory or 
-    // by providing targeted views.
-    const q = query(
-      collection(db, 'tasks'), 
-      where('orgId', '==', userProfile.orgId),
-      orderBy('createdAt', 'desc')
-    );
+    let q;
+    if (userProfile?.role === 'admin') {
+      q = query(
+        collection(db, 'tasks'), 
+        where('orgId', '==', userProfile.orgId),
+        orderBy('createdAt', 'desc')
+      );
+    } else {
+      // For members, we query tasks belonging to projects they can see.
+      // Firestore 'in' query supports up to 30 values.
+      const visibleProjectIds = visibleProjects.map(p => p.id);
+      
+      if (visibleProjectIds.length === 0) {
+        setTasks([]);
+        return;
+      }
+
+      // Firestore limits 'in' queries to 30 values.
+      const queryProjectIds = visibleProjectIds.slice(0, 30);
+
+      q = query(
+        collection(db, 'tasks'), 
+        where('orgId', '==', userProfile.orgId),
+        where('projectId', 'in', queryProjectIds)
+      );
+    }
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task)));
     }, (error) => {
       console.error("Error fetching tasks:", error);
-      // Fallback for missing index
-      const simpleQ = query(collection(db, 'tasks'), where('orgId', '==', userProfile.orgId));
-      onSnapshot(simpleQ, (snap) => {
-        setTasks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task)));
-      });
     });
     
     return unsubscribe;
-  }, [userProfile?.orgId]);
+  }, [userProfile?.orgId, userProfile?.role, user, visibleProjects]);
+
+  // Fetch Comments for Selected Task
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setComments([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, 'tasks', selectedTaskId, 'comments'),
+      orderBy('createdAt', 'asc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setComments(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Comment)));
+    });
+
+    return unsubscribe;
+  }, [selectedTaskId]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -456,6 +572,7 @@ export default function App() {
         orgId: userProfile.orgId,
         assignedTo: selectedAssignee?.uid || '',
         assignedToName: selectedAssignee?.name || '',
+        createdBy: user?.uid,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
@@ -529,6 +646,27 @@ export default function App() {
     }
   };
 
+  const handlePostComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTaskId || !newCommentText.trim() || !user) return;
+
+    setIsPostingComment(true);
+    try {
+      await addDoc(collection(db, 'tasks', selectedTaskId, 'comments'), {
+        text: newCommentText.trim(),
+        userId: user.uid,
+        userName: userProfile?.displayName || user.displayName || 'Anonymous',
+        createdAt: serverTimestamp()
+      });
+      setNewCommentText('');
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to post comment');
+    } finally {
+      setIsPostingComment(false);
+    }
+  };
+
   const handleUpdateTaskStatus = async (taskId: string, newStatus: string) => {
     try {
       const taskRef = doc(db, 'tasks', taskId);
@@ -549,7 +687,7 @@ export default function App() {
       const project = projects.find(p => p.id === projectId);
       if (!project) return;
 
-      let newMembers = [...project.members];
+      let newMembers = project.members || [];
       if (isMember) {
         newMembers = newMembers.filter(id => id !== memberId);
       } else {
@@ -564,32 +702,14 @@ export default function App() {
     }
   };
 
-  const filteredUsers = useMemo(() => {
-    if (!assigneeSearch.trim()) return [];
-    return allUsers.filter(u => 
-      u.displayName.toLowerCase().includes(assigneeSearch.toLowerCase())
-    ).slice(0, 5);
-  }, [assigneeSearch, allUsers]);
-
-  const taskStats = useMemo(() => {
-    const stats = {
-      pending: tasks.filter(t => t.status === 'pending').length,
-      inProgress: tasks.filter(t => t.status === 'in-progress').length,
-      completed: tasks.filter(t => t.status === 'completed').length,
-    };
-    return [
-      { name: 'Pending', value: stats.pending, color: '#f59e0b' },
-      { name: 'In Progress', value: stats.inProgress, color: '#3b82f6' },
-      { name: 'Completed', value: stats.completed, color: '#10b981' },
-    ];
-  }, [tasks]);
+  const loadingView = (
+    <div className="flex items-center justify-center min-h-screen bg-slate-50">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+    </div>
+  );
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-50">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      </div>
-    );
+    return loadingView;
   }
 
   if (!user) {
@@ -630,9 +750,12 @@ export default function App() {
               />
               <SidebarItem 
                 icon={<ListTodo size={18} />} 
-                label="My Tasks" 
+                label="Tasks" 
                 active={currentView === 'tasks'} 
-                onClick={() => setCurrentView('tasks')}
+                onClick={() => {
+                  setCurrentView('tasks');
+                  setSelectedProjectId(null);
+                }}
               />
               <SidebarItem 
                 icon={<Users size={18} />} 
@@ -760,15 +883,15 @@ export default function App() {
                   <div className="space-y-4">
                     <StatCard 
                       title="Active Projects" 
-                      value={projects.length} 
+                      value={visibleProjects.length} 
                       icon={<FolderKanban className="text-blue-600" />} 
                       trend="+2 this week"
                     />
                     <StatCard 
-                      title="Total Tasks" 
-                      value={tasks.length} 
+                      title="Visible Tasks" 
+                      value={visibleTasks.length} 
                       icon={<ListTodo className="text-orange-600" />} 
-                      trend={`${tasks.filter(t => t.status === 'completed').length} completed`}
+                      trend={`${visibleTasks.filter(t => t.status === 'completed').length} completed`}
                     />
                     <StatCard 
                       title="Team Members" 
@@ -787,11 +910,15 @@ export default function App() {
                   </div>
                   
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {projects.map(project => (
+                    {visibleProjects.map(project => (
                       <motion.div 
                         key={project.id}
                         whileHover={{ y: -4 }}
                         className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-all cursor-pointer group"
+                        onClick={() => {
+                          setSelectedProjectId(project.id);
+                          setCurrentView('tasks');
+                        }}
                       >
                         <div className="flex items-center justify-between mb-4">
                           <div className="bg-blue-50 p-2.5 rounded-xl text-blue-600">
@@ -851,7 +978,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {tasks.slice(0, 5).map(task => (
+                        {visibleTasks.slice(0, 5).map(task => (
                           <tr 
                             key={task.id} 
                             className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
@@ -893,10 +1020,10 @@ export default function App() {
                             </td>
                           </tr>
                         ))}
-                        {tasks.length === 0 && (
+                        {visibleTasks.length === 0 && (
                           <tr>
                             <td colSpan={5} className="px-6 py-12 text-center text-slate-400 text-sm">
-                              No tasks found. Create your first task to see it here.
+                              No tasks that you're involved in were found.
                             </td>
                           </tr>
                         )}
@@ -913,7 +1040,7 @@ export default function App() {
                   <h3 className="text-2xl font-bold text-slate-900">Projects</h3>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {projects.map(project => (
+                  {visibleProjects.map(project => (
                     <div 
                       key={project.id}
                       className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200"
@@ -926,15 +1053,15 @@ export default function App() {
                       <div className="flex items-center justify-between pt-4 border-t border-slate-50">
                         <span className="text-xs font-bold text-slate-400 capitalize">Owner: {project.ownerId === user.uid ? 'You' : 'Team'}</span>
                         <div className="flex items-center gap-2">
-                           <span className="text-xs font-bold text-blue-600">{tasks.filter(t => t.projectId === project.id).length} Tasks</span>
+                           <span className="text-xs font-bold text-blue-600">{visibleTasks.filter(t => t.projectId === project.id).length} Tasks</span>
                         </div>
                       </div>
                     </div>
                   ))}
-                  {projects.length === 0 && (
+                  {visibleProjects.length === 0 && (
                     <div className="col-span-full py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
                       <FolderKanban className="mx-auto text-slate-300 mb-4" size={48} />
-                      <p className="text-slate-500">No projects in this workspace yet.</p>
+                      <p className="text-slate-500">No projects where you are a member found.</p>
                     </div>
                   )}
                 </div>
@@ -944,52 +1071,137 @@ export default function App() {
             {currentView === 'tasks' && (
               <div className="space-y-6">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-2xl font-bold text-slate-900">My Tasks</h3>
-                </div>
-                <div className="grid gap-4">
-                  {tasks.filter(t => t.assignedTo === user.uid).map(task => (
-                    <div 
-                      key={task.id} 
-                      className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between hover:shadow-md transition-all cursor-pointer group"
-                      onClick={(e) => {
-                        // Prevent opening detail if clicking the select
-                        if ((e.target as HTMLElement).closest('select')) return;
-                        setSelectedTaskId(task.id);
-                      }}
-                    >
-                      <div className="flex gap-4">
-                        <div className={`w-1 h-12 rounded-full ${
-                          task.priority === 'high' ? 'bg-red-500' : 
-                          task.priority === 'medium' ? 'bg-amber-500' : 'bg-slate-300'
-                        }`} />
-                        <div>
-                          <h4 className="font-bold text-slate-900">{task.title}</h4>
-                          <p className="text-xs text-slate-500">{projects.find(p => p.id === task.projectId)?.name || 'Unknown Project'}</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-6">
-                        <select 
-                          value={task.status}
-                          onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value)}
-                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/20"
-                        >
-                          <option value="pending">Pending</option>
-                          <option value="in-progress">In Progress</option>
-                          <option value="completed">Completed</option>
-                        </select>
-                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
-                          task.status === 'completed' ? 'bg-green-100 text-green-700' : 
-                          task.status === 'in-progress' ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'
-                        }`}>
-                          {task.status.replace('-', ' ')}
-                        </span>
-                      </div>
+                  <div className="flex items-center gap-4">
+                    <h3 className="text-2xl font-bold text-slate-900">
+                      {selectedProjectId 
+                        ? `${projects.find(p => p.id === selectedProjectId)?.name} Tasks` 
+                        : (taskFilter === 'mine' ? 'My Tasks' : 'All My Relevant Tasks')}
+                    </h3>
+                    <div className="flex bg-slate-200 p-1 rounded-xl">
+                      <button 
+                        onClick={() => {
+                          setTaskFilter('all');
+                          setSelectedProjectId(null);
+                        }}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${taskFilter === 'all' && !selectedProjectId ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500'}`}
+                      >
+                        All
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setTaskFilter('mine');
+                          setSelectedProjectId(null);
+                        }}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${taskFilter === 'mine' && !selectedProjectId ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500'}`}
+                      >
+                        Mine
+                      </button>
                     </div>
-                  ))}
-                  {tasks.filter(t => t.assignedTo === user.uid).length === 0 && (
-                    <div className="py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
-                      <ListTodo className="mx-auto text-slate-300 mb-4" size={48} />
-                      <p className="text-slate-500">No tasks assigned to you yet.</p>
+                  </div>
+                  {selectedProjectId && (
+                    <button 
+                      onClick={() => setSelectedProjectId(null)}
+                      className="text-sm font-bold text-blue-600 hover:underline"
+                    >
+                      Clear Project Filter
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-8">
+                  {/* If filter active or empty, show flat list, otherwise group by project */}
+                  {(selectedProjectId || visibleTasks.length === 0) ? (
+                    <div className="grid gap-4">
+                      {visibleTasks
+                        .filter(t => {
+                          if (selectedProjectId) return t.projectId === selectedProjectId;
+                          if (taskFilter === 'mine') return t.assignedTo === user.uid;
+                          return true;
+                        })
+                        .map(task => (
+                          <TaskCard 
+                            key={task.id} 
+                            task={task} 
+                            project={projects.find(p => p.id === task.projectId)}
+                            onOpen={() => setSelectedTaskId(task.id)}
+                            onStatusChange={handleUpdateTaskStatus}
+                          />
+                        ))}
+                      {visibleTasks.filter(t => {
+                        if (selectedProjectId) return t.projectId === selectedProjectId;
+                        if (taskFilter === 'mine') return t.assignedTo === user.uid;
+                        return true;
+                      }).length === 0 && (
+                        <div className="py-12 text-center bg-white rounded-2xl border-2 border-dashed border-slate-200">
+                          <ListTodo className="mx-auto text-slate-300 mb-4" size={48} />
+                          <p className="text-slate-500">No tasks found.</p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    visibleProjects.map(project => {
+                      const projectTasks = visibleTasks.filter(t => {
+                        const matchesProject = t.projectId === project.id;
+                        const matchesFilter = taskFilter === 'mine' ? t.assignedTo === user.uid : true;
+                        return matchesProject && matchesFilter;
+                      });
+
+                      if (projectTasks.length === 0 && taskFilter === 'mine') return null;
+
+                      return (
+                        <div key={project.id} className="space-y-4 pt-4 border-t border-slate-100 first:border-t-0 first:pt-0">
+                          <div className="flex items-center justify-between px-2">
+                            <div className="flex items-center gap-2">
+                              <FolderKanban size={16} className="text-blue-600" />
+                              <h4 className="font-bold text-slate-800 text-sm uppercase tracking-wider">{project.name}</h4>
+                              <span className="text-xs text-slate-400 font-medium ml-2">{projectTasks.length} {projectTasks.length === 1 ? 'task' : 'tasks'}</span>
+                            </div>
+                            <button 
+                              onClick={() => setSelectedProjectId(project.id)}
+                              className="text-[10px] font-bold text-blue-600 uppercase tracking-widest hover:underline"
+                            >
+                              Focus Project
+                            </button>
+                          </div>
+                          <div className="grid gap-4">
+                            {projectTasks.map(task => (
+                              <TaskCard 
+                                key={task.id} 
+                                task={task} 
+                                project={project}
+                                onOpen={() => setSelectedTaskId(task.id)}
+                                onStatusChange={handleUpdateTaskStatus}
+                              />
+                            ))}
+                            {projectTasks.length === 0 && (
+                              <div className="py-8 text-center bg-white/50 rounded-2xl border border-dashed border-slate-200">
+                                <p className="text-slate-400 text-xs italic">No tasks in this project yet.</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  
+                  {/* Tasks without projects (edge case) */}
+                  {!selectedProjectId && visibleTasks.some(t => !projects.find(p => p.id === t.projectId)) && (
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 px-2">
+                        <ListTodo size={16} className="text-slate-400" />
+                        <h4 className="font-bold text-slate-400 text-sm uppercase tracking-wider">Uncategorized Tasks</h4>
+                      </div>
+                      <div className="grid gap-4">
+                         {visibleTasks
+                           .filter(t => !projects.find(p => p.id === t.projectId))
+                           .map(task => (
+                            <TaskCard 
+                              key={task.id} 
+                              task={task} 
+                              onOpen={() => setSelectedTaskId(task.id)}
+                              onStatusChange={handleUpdateTaskStatus}
+                            />
+                          ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1392,7 +1604,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="p-8 space-y-8">
+                      <div className="p-8 space-y-8 h-[400px] overflow-y-auto">
                         <div className="space-y-3">
                           <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Description</h4>
                           <p className="text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100 italic">
@@ -1423,6 +1635,55 @@ export default function App() {
                             </select>
                           </div>
                         </div>
+
+                        {/* Comments Section */}
+                        <div className="space-y-6 pt-6 border-t border-slate-100">
+                          <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                            <MessageSquare size={16} />
+                            Discussion ({comments.length})
+                          </h4>
+                          
+                          <div className="space-y-4">
+                            {comments.map((comment) => (
+                              <div key={comment.id} className="flex gap-3">
+                                <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-500 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                  {comment.userName.charAt(0)}
+                                </div>
+                                <div className="flex-1 bg-slate-50 p-3 rounded-2xl rounded-tl-none border border-slate-100">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-slate-900">{comment.userName}</span>
+                                    <span className="text-[10px] text-slate-400">
+                                      {comment.createdAt ? new Date(comment.createdAt.seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
+                                    </span>
+                                  </div>
+                                  <p className="text-sm text-slate-600">{comment.text}</p>
+                                </div>
+                              </div>
+                            ))}
+                            {comments.length === 0 && (
+                              <p className="text-center text-xs text-slate-400 italic py-4">No comments yet. Start the conversation!</p>
+                            )}
+                          </div>
+
+                          {/* Post Comment Input */}
+                          <form onSubmit={handlePostComment} className="relative mt-4">
+                            <input 
+                              type="text"
+                              placeholder="Write a comment..."
+                              className="w-full h-12 pl-4 pr-12 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
+                              value={newCommentText}
+                              onChange={(e) => setNewCommentText(e.target.value)}
+                              disabled={isPostingComment}
+                            />
+                            <button 
+                              type="submit"
+                              disabled={!newCommentText.trim() || isPostingComment}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-all disabled:opacity-30 disabled:hover:bg-transparent"
+                            >
+                              <Send size={18} />
+                            </button>
+                          </form>
+                        </div>
                       </div>
 
                       <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
@@ -1446,6 +1707,46 @@ export default function App() {
 }
 
 // --- Helper Components ---
+
+function TaskCard({ task, project, onOpen, onStatusChange }: { task: Task, project?: Project, onOpen: () => void, onStatusChange: (id: string, status: string) => any, key?: any }) {
+  return (
+    <div 
+      className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between hover:shadow-md transition-all cursor-pointer group"
+      onClick={onOpen}
+    >
+      <div className="flex gap-4">
+        <div className={`w-1 h-12 rounded-full ${
+          task.priority === 'high' ? 'bg-red-500' : 
+          task.priority === 'medium' ? 'bg-amber-500' : 'bg-slate-300'
+        }`} />
+        <div>
+          <h4 className="font-bold text-slate-900">{task.title}</h4>
+          <span className="text-xs text-slate-500 flex items-center gap-1.5">
+            {project && <><FolderKanban size={10} /> {project.name} <span className="w-1 h-1 rounded-full bg-slate-300 mx-1" /></>}
+            Assigned to: {task.assignedToName || 'Unassigned'}
+          </span>
+        </div>
+      </div>
+      <div className="flex items-center gap-6" onClick={e => e.stopPropagation()}>
+        <select 
+          value={task.status}
+          onChange={(e) => onStatusChange(task.id, e.target.value)}
+          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/20"
+        >
+          <option value="pending">Pending</option>
+          <option value="in-progress">In Progress</option>
+          <option value="completed">Completed</option>
+        </select>
+        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
+          task.status === 'completed' ? 'bg-green-100 text-green-700' : 
+          task.status === 'in-progress' ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'
+        }`}>
+          {task.status.replace('-', ' ')}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function SidebarItem({ icon, label, active = false, onClick }: { icon: React.ReactNode, label: string, active?: boolean, onClick: () => void }) {
   return (
